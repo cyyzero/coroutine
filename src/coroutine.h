@@ -8,6 +8,7 @@
 #define DEFAULT_STACK_SIZE     (1024 * 1024)
 #define DEFAULT_COROUTINE_SIZE 16
 
+// call back function type
 typedef void (*Func)(void*);
 
 enum Coroutine_status
@@ -40,6 +41,7 @@ struct Registers
     uint64_t r15;
 };
 
+// task context
 struct Context
 {
     struct Registers regs;

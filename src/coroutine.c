@@ -6,7 +6,7 @@
 #include "coroutine.h"
 
 #define MOV_REG2MEM(reg, mem) asm volatile ("movq %%" #reg ", %0\n\t" : "=m" (mem) :: "memory")
-#define MOV_MEM2REG(mem, reg) asm volatile ("movq %0, %%" #reg "\n\t" : :"m" (mem))
+#define MOV_MEM2REG(mem, reg) asm volatile ("movq %0, %%" #reg "\n\t" : :"m" (mem) : #reg)
 
 #define REG_STORE(reg, pointer) MOV_REG2MEM(reg, pointer->regs.reg)
 #define REG_RESTORE(reg, pointer) MOV_MEM2REG(pointer->regs.reg, reg)
@@ -21,14 +21,16 @@ static void main_func(void);
 // save current context to prev, and switch context to next
 static void context_swap(struct Context* prev_, struct Context* next_)
 {
+    // store in .data, avoid copying stack frame to the new stack
     static uint64_t eip;
-    static struct Context* prev;
-    static struct Context* next;
+    static volatile struct Context* prev;
+    static volatile struct Context* next;
 
     prev = prev_;
     next = next_;
     eip = next->regs.rip;
 
+    // store current context in prev
     REG_STORE(rax, prev);
     REG_STORE(rbx, prev);
     REG_STORE(rcx, prev);
@@ -45,10 +47,10 @@ static void context_swap(struct Context* prev_, struct Context* next_)
     REG_STORE(r15, prev);
     REG_STORE(rbp, prev);
     REG_STORE(rsp, prev);
+    // jump to $eip_to_store
+    asm volatile ("movq $eip_to_store, %0" : "=m" (prev->regs.rip));
 
-    // 48 c7 c2 f4 09 40 00
-    asm volatile ("movq $eip_to_store, %0" : "=r" (prev->regs.rip));
-
+    // resotre context from next
     REG_RESTORE(rax, next);
     REG_RESTORE(rbx, next);
     REG_RESTORE(rcx, next);
@@ -65,12 +67,13 @@ static void context_swap(struct Context* prev_, struct Context* next_)
     REG_RESTORE(r15, next);
     REG_RESTORE(rbp, next);
     REG_RESTORE(rsp, next);
-
     asm volatile ("jmpq *%0\n\t" : : "m" (eip));
 
+    // label: eip_to_store
     asm volatile("eip_to_store:\n");
 }
 
+// construct a Coroutine and return it
 static struct Coroutine* co_new(Func func, void* arg, size_t stack_size)
 {
     struct Coroutine* co = malloc(sizeof(*co));
@@ -85,12 +88,14 @@ static struct Coroutine* co_new(Func func, void* arg, size_t stack_size)
     return co;
 }
 
+// destruct a Coroutine
 static void co_delete(struct Coroutine* co)
 {
     free(co->stack);
     free(co);
 }
 
+// Coroutine task
 static void main_func(void)
 {
     static uint8_t stack[1024 * 1024];
@@ -118,6 +123,7 @@ static void main_func(void)
     // free co
     co_delete(co);
 
+    // update schedule
     schedule.coroutines[schedule.running_id] = NULL;
     --schedule.co_size;
     schedule.running_id = -1;
@@ -139,10 +145,10 @@ static void main_func(void)
     REG_RESTORE2(r15, schedule.main);
     REG_RESTORE2(rbp, schedule.main);
     REG_RESTORE2(rsp, schedule.main);
-
     asm volatile ("jmpq *%0\n\t" : : "m" (schedule.main.regs.rip));
 }
 
+// initialize static schedule
 void schedule_initialize(void)
 {
     schedule.running_id = -1;
@@ -152,6 +158,8 @@ void schedule_initialize(void)
     memset(schedule.coroutines, 0, sizeof(struct Coroutine*) * schedule.co_capacity);
 }
 
+
+// destroy static schedule
 void schedule_destroy(void)
 {
     for (int i = 0; i < schedule.co_size; ++i)
@@ -164,6 +172,7 @@ void schedule_destroy(void)
     free(schedule.coroutines);
 }
 
+// create a coroutine, register a call back function
 int coroutine_create(Func func, void* arg, size_t stack_size)
 {
     struct Coroutine* co = co_new(func, arg, stack_size);
@@ -192,6 +201,7 @@ int coroutine_create(Func func, void* arg, size_t stack_size)
     return -1;
 }
 
+// execute a coroutine
 void coroutine_resume(int id)
 {
     assert(schedule.running_id == -1);
@@ -218,6 +228,7 @@ void coroutine_resume(int id)
     }
 }
 
+// switch to the coroutine which resumed current coroutine
 void coroutine_yield(void)
 {
     int id = schedule.running_id;
@@ -228,6 +239,7 @@ void coroutine_yield(void)
     context_swap(&co->context, &schedule.main);
 }
 
+// get a coroutine's status
 enum Coroutine_status coroutine_status(int id)
 {
     assert(id >= 0 && id < schedule.co_capacity);
@@ -237,6 +249,7 @@ enum Coroutine_status coroutine_status(int id)
         return schedule.coroutines[id]->status;
 }
 
+// get current running coroutine
 int Coroutine_running(void)
 {
     return schedule.running_id;
